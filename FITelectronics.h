@@ -91,14 +91,15 @@ public:
             //if (fullSyncTimer->isActive()) fullSyncTimer->stop();
         });
         connect(this, &IPbusTarget::IPbusStatusOK, this, [=]() {
+            IPBusPacket p;
             if (subdetector == FV0) writeNbits(0xE, 0x3, 2, 8); //apply FV0 trigger mode
-            addWordToWrite(TCMparameters["T1_SIGN"].address, prepareSignature(FIT[sd].triggers[0].signature));
-            addWordToWrite(TCMparameters["T2_SIGN"].address, prepareSignature(FIT[sd].triggers[1].signature));
-            addWordToWrite(TCMparameters["T3_SIGN"].address, prepareSignature(FIT[sd].triggers[2].signature));
-            addWordToWrite(TCMparameters["T4_SIGN"].address, prepareSignature(FIT[sd].triggers[3].signature));
-            addWordToWrite(TCMparameters["T5_SIGN"].address, prepareSignature(FIT[sd].triggers[4].signature));
+            p.addWordToWrite(this, TCMparameters["T1_SIGN"].address, prepareSignature(FIT[sd].triggers[0].signature));
+            p.addWordToWrite(this, TCMparameters["T2_SIGN"].address, prepareSignature(FIT[sd].triggers[1].signature));
+            p.addWordToWrite(this, TCMparameters["T3_SIGN"].address, prepareSignature(FIT[sd].triggers[2].signature));
+            p.addWordToWrite(this, TCMparameters["T4_SIGN"].address, prepareSignature(FIT[sd].triggers[3].signature));
+            p.addWordToWrite(this, TCMparameters["T5_SIGN"].address, prepareSignature(FIT[sd].triggers[4].signature));
             //addWordToWrite(0x6A, 0x6DB6); //switch all trigger outputs to signature mode
-            if (!transceive()) return;
+            if (!transceive(p)) return;
             if (TCM.services.isEmpty()) createTCMservices();
             PMsReady = false;
             sync();
@@ -303,22 +304,24 @@ signals:
 public slots:
 
     void clearFIFOs() {
-		quint32 load = readRegister(TypeTCM::Counters::addressFIFOload);
-        if (load == 0xFFFFFFFF) return;
+      quint32 load = readRegister(TypeTCM::Counters::addressFIFOload);
+      if (load == 0xFFFFFFFF) return;
+      while (load) {
+        IPBusPacket p;
+        p.addTransaction(this, nonIncrementingRead, TypeTCM::Counters::addressFIFO, nullptr, load > 255 ? 255 : load);
+        addTransaction(this, read, TypeTCM::Counters::addressFIFOload, &load);
+        transceive(p);
+      }
+      foreach (TypePM *pm, PM) {
+        load = readRegister(pm->baseAddress + TypePM::Counters::addressFIFOload);
+        if (load == 0xFFFFFFFF) continue;
         while (load) {
-			addTransaction(nonIncrementingRead, TypeTCM::Counters::addressFIFO, nullptr, load > 255 ? 255 : load);
-			addTransaction(read, TypeTCM::Counters::addressFIFOload, &load);
-			transceive();
-		}
-        foreach (TypePM *pm, PM) {
-			load = readRegister(pm->baseAddress + TypePM::Counters::addressFIFOload);
-            if (load == 0xFFFFFFFF) continue;
-			while (load) {
-				addTransaction(nonIncrementingRead, pm->baseAddress + TypePM::Counters::addressFIFO, nullptr, load > 255 ? 255 : load);
-				addTransaction(read, pm->baseAddress + TypePM::Counters::addressFIFOload, &load);
-				transceive();
-			}
-		}
+          IPBusPacket p;
+          p.addTransaction(this, nonIncrementingRead, pm->baseAddress + TypePM::Counters::addressFIFO, nullptr, load > 255 ? 255 : load);
+          p.addTransaction(this, read, pm->baseAddress + TypePM::Counters::addressFIFOload, &load);
+          transceive(p);
+        }
+      }
     }
 
     void apply_COUNTERS_UPD_RATE(quint8 val) {
@@ -326,11 +329,11 @@ public slots:
         writeRegister(TCMparameters["COUNTERS_UPD_RATE"].address, 0, false);
         clearFIFOs();
         if (val <= 7) {
-            TCM.set.COUNTERS_UPD_RATE = val;
-            if (val > 0) {
-                writeParameter("COUNTERS_UPD_RATE", val, TCMid);
-                countersTimer->start(countersUpdatePeriod_ms[val] / 2);
-            }
+          TCM.set.COUNTERS_UPD_RATE = val;
+          if (val > 0) {
+            writeParameter("COUNTERS_UPD_RATE", val, TCMid);
+            countersTimer->start(countersUpdatePeriod_ms[val] / 2);
+          }
         } else emit error("Wrong COUNTERS_UPD_RATE value: " + QString::number(val), logicError);
     }
 
@@ -340,23 +343,25 @@ public slots:
         TCM.set.GBT.RDH_FEE_ID = TCMid;
         TCM.set.GBT.RDH_SYS_ID = FIT[subdetector].systemID;
         TCM.set.GBT.BCID_DELAY = BCIDdelay;
-        addTransaction(write, GBTunit::controlAddress, TCM.set.GBT.registers, GBTunit::controlSize);
+        IPBusPacket p;
+        p.addTransaction(this, write, GBTunit::controlAddress, TCM.set.GBT.registers, GBTunit::controlSize);
         foreach (TypePM *pm, PM) {
             BCIDdelay = pm->set.GBT.BCID_DELAY;
             for (quint8 j=0; j<GBTunit::controlSize; ++j) pm->set.GBT.registers[j] = GBTunit::defaults[j];
             pm->set.GBT.RDH_FEE_ID = pm->FEEid;
             pm->set.GBT.RDH_SYS_ID = FIT[subdetector].systemID;
             pm->set.GBT.BCID_DELAY = BCIDdelay;
-            addTransaction(write, pm->baseAddress + GBTunit::controlAddress, pm->set.GBT.registers, GBTunit::controlSize);
+            p.addTransaction(this, write, pm->baseAddress + GBTunit::controlAddress, pm->set.GBT.registers, GBTunit::controlSize);
         }
-        transceive();
+        transceive(p);
     }
 
     void checkPMlinks() {
-        addTransaction(read, TCMparameters["PM_MASK_SPI"].address, &TCM.act.PM_MASK_SPI);
-        addTransaction(read, TCMparameters["CH_MASK_A"].address, dt);
-        addTransaction(read, TCMparameters["CH_MASK_C"].address, dt + 1);
-        if (transceive()) {
+        IPBusPacket p;
+        p.addTransaction(this, read, TCMparameters["PM_MASK_SPI"].address, &TCM.act.PM_MASK_SPI);
+        p.addTransaction(this, read, TCMparameters["CH_MASK_A"].address, dt);
+        p.addTransaction(this, read, TCMparameters["CH_MASK_C"].address, dt + 1);
+        if (transceive(p)) {
             TCM.set.CH_MASK_A = dt[0];
             TCM.set.CH_MASK_C = dt[1];
             TCM.set.PM_MASK_SPI = TCM.act.PM_MASK_SPI;
@@ -371,16 +376,17 @@ public slots:
 				deletePMservices(allPMs + i);
             } else {
                 TCM.set.PM_MASK_SPI |= 1 << i;
-				PM.insert(allPMs[i].FEEid, allPMs + i);
+                PM.insert(allPMs[i].FEEid, allPMs + i);
                 (i < 10 ? PMsA : PMsC).append(allPMs + i);
-				if (allPMs[i].services.isEmpty()) createPMservices(allPMs + i);
+                if (allPMs[i].services.isEmpty()) createPMservices(allPMs + i);
                 if (i > 9) TCM.set.CH_MASK_C |= 1 << (i - 10);
                 else       TCM.set.CH_MASK_A |= 1 << i;
             }
         }
-        addWordToWrite(TCMparameters["CH_MASK_A"].address, TCM.set.CH_MASK_A);
-        addWordToWrite(TCMparameters["CH_MASK_C"].address, TCM.set.CH_MASK_C);
-        if (transceive()) emit linksStatusReady();
+        IPBusPacket p;
+        p.addWordToWrite(this, TCMparameters["CH_MASK_A"].address, TCM.set.CH_MASK_A);
+        p.addWordToWrite(this, TCMparameters["CH_MASK_C"].address, TCM.set.CH_MASK_C);
+        if (transceive(p)) emit linksStatusReady();
     }
 
     void writeParameter(QString name, quint64 val, quint16 FEEid, quint8 iCh = 0) {
@@ -396,23 +402,37 @@ public slots:
             val != 0 ? setBit(p.bitshift, address) : clearBit(p.bitshift, address);
         else if (p.bitwidth == 64) {
             quint32 w[2] = {quint32(val), quint32(val >> 32)};
-			addTransaction(write, address, w, 2);
-            if (transceive()) sync();
-        } else
+            IPBusPacket pp;
+            pp.addTransaction(this, write, address, w, 2);
+            if (transceive(pp)) sync();
+        } else {
             writeNbits(address, val, p.bitwidth, p.bitshift);
+        }
     }
 
     void readCountersFIFO() {
         quint16 time_ms = countersUpdatePeriod_ms[TCM.act.COUNTERS_UPD_RATE];
-        addTransaction(read, TypeTCM::Counters::addressFIFOload, &TCM.counters.FIFOload);
-        foreach (TypePM *pm, PM) addTransaction(read, pm->baseAddress + TypePM::Counters::addressFIFOload, &pm->counters.FIFOload);
-        if (!transceive()) return;
-        if (TCM.counters.FIFOload) addTransaction(nonIncrementingRead, TypeTCM::Counters::addressFIFO, TCM.counters.New, TypeTCM::Counters::number);
-        foreach (TypePM *pm, PM) if (pm->counters.FIFOload) {
-            if (maxPacket - responseSize <= TypePM::Counters::number) transceive();
-            addTransaction(nonIncrementingRead, pm->baseAddress + TypePM::Counters::addressFIFO, pm->counters.New, TypePM::Counters::number);
+        IPBusPacket p;
+        p.addTransaction(this, read, TypeTCM::Counters::addressFIFOload, &TCM.counters.FIFOload);
+        foreach (TypePM *pm, PM) {
+          p.addTransaction(this, read, pm->baseAddress + TypePM::Counters::addressFIFOload, &pm->counters.FIFOload);
         }
-        if (requestSize > 1 && !transceive()) return;
+        if (!transceive(p)) return;
+
+        p = IPBusPacket(); // clear
+        if (TCM.counters.FIFOload) {
+          p.addTransaction(this, nonIncrementingRead, TypeTCM::Counters::addressFIFO, TCM.counters.New, TypeTCM::Counters::number);
+        }
+        foreach (TypePM *pm, PM) {
+          if (pm->counters.FIFOload) {
+            if (maxPacket - p.responseSize() <= TypePM::Counters::number) {
+              transceive(p);
+              p = IPBusPacket(); // clear
+            }
+            p.addTransaction(this, nonIncrementingRead, pm->baseAddress + TypePM::Counters::addressFIFO, pm->counters.New, TypePM::Counters::number);
+          }
+          if (p.requestSize() > 1 && !transceive(p)) return;
+        }
         if (TCM.counters.FIFOload) {
             TCM.counters.oldTime = QDateTime::currentDateTime();
             for (quint8 i=0; i<TypeTCM::Counters::number; ++i) {
@@ -434,8 +454,9 @@ public slots:
     }
 
     void readCountersDirectly() {
-        addTransaction(read, TypeTCM::Counters::addressDirect, TCM.counters.New, TypeTCM::Counters::number);
-        if (transceive()) {
+        IPBusPacket p;
+        p.addTransaction(this, read, TypeTCM::Counters::addressDirect, TCM.counters.New, TypeTCM::Counters::number);
+        if (transceive(p)) {
             TCM.counters.newTime = QDateTime::currentDateTime();
             quint32 time_ms = TCM.counters.oldTime.msecsTo(TCM.counters.newTime);
             if (time_ms < 100) return;
@@ -448,46 +469,47 @@ public slots:
             emit countersReady(TCMid);
         }
         foreach (TypePM *pm, PM) {
-            addTransaction(read, pm->baseAddress + TypePM::Counters::addressDirect, pm->counters.New, TypePM::Counters::number);
-            if (!transceive() || !PM.contains(pm->FEEid)) continue;
+            IPBusPacket p;
+            p.addTransaction(this, read, pm->baseAddress + TypePM::Counters::addressDirect, pm->counters.New, TypePM::Counters::number);
+            if (!transceive(p) || !PM.contains(pm->FEEid)) continue;
             pm->counters.newTime = QDateTime::currentDateTime();
             quint32 time_ms = pm->counters.oldTime.msecsTo(pm->counters.newTime);
             for (quint8 i=0; i<TypePM::Counters::number; ++i) {
                 pm->counters.rate[i] = (pm->counters.New[i] - pm->counters.Old[i]) * 1000. / time_ms;
                 pm->counters.Old[i] = pm->counters.New[i];
             }
-			pm->counters.oldTime = pm->counters.newTime;
+	    pm->counters.oldTime = pm->counters.newTime;
             foreach (DimService *s, pm->counters.services) s->updateService();
             emit countersReady(pm->FEEid);
         }
     }
 
-    void addSystemValuesToRead() {
-        addTransaction(read, TypeTCM::ActualValues::block0addr, TCM.act.registers0, TypeTCM::ActualValues::block0size-1); //register 0x20 exist in TCM FW starting from late November 2021
-        addTransaction(read, TypeTCM::ActualValues::block1addr, TCM.act.registers1, TypeTCM::ActualValues::block1size);
-        addTransaction(read, TCMparameters["COUNTERS_UPD_RATE"].address, &TCM.act.COUNTERS_UPD_RATE);
+    void addSystemValuesToRead(IPBusPacket &p) {
+      p.addTransaction(this, read, TypeTCM::ActualValues::block0addr, TCM.act.registers0, TypeTCM::ActualValues::block0size-1); //register 0x20 exist in TCM FW starting from late November 2021
+      p.addTransaction(this, read, TypeTCM::ActualValues::block1addr, TCM.act.registers1, TypeTCM::ActualValues::block1size);
+      p.addTransaction(this, read, TCMparameters["COUNTERS_UPD_RATE"].address, &TCM.act.COUNTERS_UPD_RATE);
     }
 
-    void addTCMvaluesToRead() {
-        addTransaction(read, GBTunit::controlAddress, TCM.act.GBT.Control.registers, GBTunit::controlSize);
-        addTransaction(read, GBTunit:: statusAddress, TCM.act.GBT.Status .registers, GBTunit:: statusSize);
-        addTransaction(read, 0xF7, (quint32 *)&TCM.act.FW_TIME_MCU );
-        addTransaction(read, 0xFF, (quint32 *)&TCM.act.FW_TIME_FPGA);
-        addTransaction(read, TypeTCM::ActualValues::block2addr, TCM.act.registers2, TypeTCM::ActualValues::block2size);
-        addTransaction(read, TypeTCM::ActualValues::block3addr, TCM.act.registers3, TypeTCM::ActualValues::block3size);
+    void addTCMvaluesToRead(IPBusPacket &p) {
+      p.addTransaction(this, read, GBTunit::controlAddress, TCM.act.GBT.Control.registers, GBTunit::controlSize);
+      p.addTransaction(this, read, GBTunit:: statusAddress, TCM.act.GBT.Status .registers, GBTunit:: statusSize);
+      p.addTransaction(this, read, 0xF7, (quint32 *)&TCM.act.FW_TIME_MCU );
+      p.addTransaction(this, read, 0xFF, (quint32 *)&TCM.act.FW_TIME_FPGA);
+      p.addTransaction(this, read, TypeTCM::ActualValues::block2addr, TCM.act.registers2, TypeTCM::ActualValues::block2size);
+      p.addTransaction(this, read, TypeTCM::ActualValues::block3addr, TCM.act.registers3, TypeTCM::ActualValues::block3size);
     }
 
-    void addPMvaluesToRead(TypePM *pm) {
-        addTransaction(read, pm->baseAddress + GBTunit::controlAddress, pm->act.GBT.Control.registers, GBTunit::controlSize);
-        addTransaction(read, pm->baseAddress + GBTunit:: statusAddress, pm->act.GBT.Status .registers, GBTunit:: statusSize);
-        addTransaction(read, pm->baseAddress + 0xF7, (quint32 *)&pm->act.FW_TIME_MCU );
-        addTransaction(read, pm->baseAddress + 0xFF, (quint32 *)&pm->act.FW_TIME_FPGA);
-        addTransaction(read, pm->baseAddress + TypePM::ActualValues::block0addr, pm->act.registers0, TypePM::ActualValues::block0size);
-        addTransaction(read, pm->baseAddress + TypePM::ActualValues::block1addr, pm->act.registers1, TypePM::ActualValues::block1size);
-        addTransaction(read, pm->baseAddress + TypePM::ActualValues::block2addr, pm->act.registers2, TypePM::ActualValues::block2size - 1); //voltage1_8 value is already read
+    void addPMvaluesToRead(IPBusPacket&p, TypePM *pm) {
+      p.addTransaction(this, read, pm->baseAddress + GBTunit::controlAddress, pm->act.GBT.Control.registers, GBTunit::controlSize);
+      p.addTransaction(this, read, pm->baseAddress + GBTunit:: statusAddress, pm->act.GBT.Status .registers, GBTunit:: statusSize);
+      p.addTransaction(this, read, pm->baseAddress + 0xF7, (quint32 *)&pm->act.FW_TIME_MCU );
+      p.addTransaction(this, read, pm->baseAddress + 0xFF, (quint32 *)&pm->act.FW_TIME_FPGA);
+      p.addTransaction(this, read, pm->baseAddress + TypePM::ActualValues::block0addr, pm->act.registers0, TypePM::ActualValues::block0size);
+      p.addTransaction(this, read, pm->baseAddress + TypePM::ActualValues::block1addr, pm->act.registers1, TypePM::ActualValues::block1size);
+      p.addTransaction(this, read, pm->baseAddress + TypePM::ActualValues::block2addr, pm->act.registers2, TypePM::ActualValues::block2size - 1); //voltage1_8 value is already read
     }
 
-	bool read1PM(TypePM *pm) {
+    bool read1PM(TypePM *pm) {
         pm->act.voltage1_8 = readRegister(pm->baseAddress + 0xFE);
         if (pm->act.voltage1_8 == 0xFFFFFFFF) { //SPI error
             clearBit(pm - allPMs, 0x1E, false);
@@ -498,20 +520,22 @@ public slots:
             log(QString(pm->name) + " not available by SPI");
             emit linksStatusReady();
         } else {
-            addPMvaluesToRead(pm);
-            if (!transceive()) return false;
-            pm->act.calculateValues();
-            pm->counters.GBT.calculateRate(pm->act.GBT.Status.wordsCount, pm->act.GBT.Status.eventsCount);
-            foreach (DimService *s, pm->services) s->updateService();
+          IPBusPacket p;
+          addPMvaluesToRead(p, pm);
+          if (!transceive(p)) return false;
+          pm->act.calculateValues();
+          pm->counters.GBT.calculateRate(pm->act.GBT.Status.wordsCount, pm->act.GBT.Status.eventsCount);
+          foreach (DimService *s, pm->services) s->updateService();
         }
         return true;
-    }     
+    }
 
     void sync() { //read actual values
         if (!isOnline) return;
-        addSystemValuesToRead();
-        addTCMvaluesToRead();
-        if (!transceive()) return;
+        IPBusPacket p;
+        addSystemValuesToRead(p);
+        addTCMvaluesToRead(p);
+        if (!transceive(p)) return;
         TCM.act.registers0[0x20] = readRegister(0x20);//register 0x20 exist in TCM FW starting from late November 2021, 0xFFFFFFFF will be written with earlier FWs
         TCM.act.calculateValues();
         TCM.counters.GBT.calculateRate(TCM.act.GBT.Status.wordsCount, TCM.act.GBT.Status.eventsCount);
@@ -545,15 +569,20 @@ public slots:
             adjEven = !adjEven;
             if (adjEven) return;
             quint8 c = 0;
+            IPBusPacket p;
             for (quint8 iCh = 0; iCh<12; ++iCh) {
                 if (targetPM->counters.rateCh[iCh].CFD < targetRate_Hz + sqrt(targetRate_Hz)) { thHi[iCh] = targetPM->act.THRESHOLD_CALIBR[iCh]; }
                 if (targetPM->counters.rateCh[iCh].CFD > targetRate_Hz - sqrt(targetRate_Hz)) { thLo[iCh] = targetPM->act.THRESHOLD_CALIBR[iCh]; }
                 if (thLo[iCh] != thHi[iCh]) {
-                    addWordToWrite(targetPM->baseAddress + PMparameters["THRESHOLD_CALIBR"].address + iCh, (thHi[iCh] + thLo[iCh]) / 2);
-                    ++c;
+                  p.addWordToWrite(this, targetPM->baseAddress + PMparameters["THRESHOLD_CALIBR"].address + iCh, (thHi[iCh] + thLo[iCh]) / 2);
+                  ++c;
                 }
             }
-            if (c == 0) disconnect(adjustConnection); else transceive();
+            if (c == 0) {
+              disconnect(adjustConnection);
+            } else {
+              transceive(p);
+            }
         });
     }
 
@@ -669,18 +698,19 @@ public slots:
     }
     void apply_RESET_SYSTEM(bool forceLocalClock = false) { PMsReady = false; writeRegister(0xF, forceLocalClock ? 0xC00 : 0x800); }
     void apply_RESET_ERRORS(bool syncOnSuccess = true) {
-        if (!TCM.act.GBT.isOK()) {
-            addTransaction(RMWbits, GBTunit::controlAddress, masks(0xFFFF00FF, 0x00000000)); //clear all reset bits
-            addTransaction(RMWbits, GBTunit::controlAddress, masks(0xFFFFFFFF, 1 << GBTunit::RB_readoutFSM | 1 << GBTunit::RB_GBTRxError));
-            addTransaction(RMWbits, GBTunit::controlAddress, masks(0xFFBF00FF, 0x00000000)); //clear all reset bits and unlock
-        }
-        foreach (TypePM *pm, PM) if (!pm->act.GBT.isOK()) {
-            quint32 address = pm->baseAddress + GBTunit::controlAddress;
-            addTransaction(RMWbits, address, masks(0xFFFF00FF, 0x00000000)); //clear all reset bits
-            addTransaction(RMWbits, address, masks(0xFFFFFFFF, 1 << GBTunit::RB_readoutFSM | 1 << GBTunit::RB_GBTRxError));
-            addTransaction(RMWbits, address, masks(0xFFBF00FF, 0x00000000)); //clear all reset bits and unlock
-        }
-        writeRegister(0xF, 0x4, syncOnSuccess);
+      IPBusPacket p;
+      if (!TCM.act.GBT.isOK()) {
+        p.addTransaction(this, RMWbits, GBTunit::controlAddress, masks(0xFFFF00FF, 0x00000000)); //clear all reset bits
+        p.addTransaction(this, RMWbits, GBTunit::controlAddress, masks(0xFFFFFFFF, 1 << GBTunit::RB_readoutFSM | 1 << GBTunit::RB_GBTRxError));
+        p.addTransaction(this, RMWbits, GBTunit::controlAddress, masks(0xFFBF00FF, 0x00000000)); //clear all reset bits and unlock
+      }
+      foreach (TypePM *pm, PM) if (!pm->act.GBT.isOK()) {
+        quint32 address = pm->baseAddress + GBTunit::controlAddress;
+        p.addTransaction(this, RMWbits, address, masks(0xFFFF00FF, 0x00000000)); //clear all reset bits
+        p.addTransaction(this, RMWbits, address, masks(0xFFFFFFFF, 1 << GBTunit::RB_readoutFSM | 1 << GBTunit::RB_GBTRxError));
+        p.addTransaction(this, RMWbits, address, masks(0xFFBF00FF, 0x00000000)); //clear all reset bits and unlock
+      }
+      writeRegister(p, 0xF, 0x4, syncOnSuccess);
     }
 
     void apply_ADC0_RANGE      (quint16 FEEid, quint8 Ch) { writeParameter("ADC0_RANGE"      , PM[FEEid]->set.ADC_RANGE[Ch-1][0]    , FEEid, Ch-1); }
@@ -748,25 +778,36 @@ public slots:
 
     void apply_OR_GATE_PM (quint16 FEEid) { writeParameter("OR_GATE" , PM[FEEid]->set.OR_GATE , FEEid); }
     void apply_OR_GATE_sideA(quint16 val) {
-        for (quint8 iPM =  0; iPM < 10; ++iPM) if (TCM.act.PM_MASK_SPI & 1 << iPM) addWordToWrite(allPMs[iPM].baseAddress + PMparameters["OR_GATE"].address, val);
-        if (transceive()) sync();
+      IPBusPacket p;
+      for (quint8 iPM =  0; iPM < 10; ++iPM) {
+        if (TCM.act.PM_MASK_SPI & 1 << iPM) {
+          p.addWordToWrite(this, allPMs[iPM].baseAddress + PMparameters["OR_GATE"].address, val);
+        }
+      }
+      if (transceive(p)) sync();
     }
     void apply_OR_GATE_sideC(quint16 val) {
-        for (quint8 iPM = 10; iPM < 20; ++iPM) if (TCM.act.PM_MASK_SPI & 1 << iPM) addWordToWrite(allPMs[iPM].baseAddress + PMparameters["OR_GATE"].address, val);
-        if (transceive()) sync();
+      IPBusPacket p;
+      for (quint8 iPM = 10; iPM < 20; ++iPM) {
+        if (TCM.act.PM_MASK_SPI & 1 << iPM) {
+          p.addWordToWrite(this, allPMs[iPM].baseAddress + PMparameters["OR_GATE"].address, val);
+        }
+      }
+      if (transceive(p)) sync();
     }
     void apply_CFD_SATR(quint16 FEEid) { writeParameter("CFD_SATR", PM[FEEid]->set.CFD_SATR, FEEid); }
     void apply_TRG_CNT_MODE(quint16 FEEid, bool CFDinGate) { writeParameter("TRG_CNT_MODE", CFDinGate, FEEid); }
     void apply_CH_MASK_DATA (quint16 FEEid) { writeParameter("CH_MASK_DATA" , PM[FEEid]->set.CH_MASK_DATA , FEEid); }
     void apply_CH_MASK_TRG  (quint16 FEEid) {
-        for (quint8 i=0; i<12; ++i) {
-            bool b = PM[FEEid]->set.TIME_ALIGN[i].blockTriggers;
-            if (bool(PM[FEEid]->act.timeAlignment[i].blockTriggers) != b) {
-				if (b) addTransaction(RMWbits, PM[FEEid]->baseAddress + PMparameters["noTriggerMode"].address + i, masks(0xFFFFFFFF, 1 << PMparameters["noTriggerMode"].bitshift));
-				else   addTransaction(RMWbits, PM[FEEid]->baseAddress + PMparameters["noTriggerMode"].address + i, masks(~(1 << PMparameters["noTriggerMode"].bitshift), 0));
-            }
+      IPBusPacket p;
+      for (quint8 i=0; i<12; ++i) {
+        bool b = PM[FEEid]->set.TIME_ALIGN[i].blockTriggers;
+        if (bool(PM[FEEid]->act.timeAlignment[i].blockTriggers) != b) {
+          if (b) p.addTransaction(this, RMWbits, PM[FEEid]->baseAddress + PMparameters["noTriggerMode"].address + i, masks(0xFFFFFFFF, 1 << PMparameters["noTriggerMode"].bitshift));
+          else   p.addTransaction(this, RMWbits, PM[FEEid]->baseAddress + PMparameters["noTriggerMode"].address + i, masks(~(1 << PMparameters["noTriggerMode"].bitshift), 0));
         }
-        if (transceive()) sync();
+      }
+      if (transceive(p)) sync();
     }
 
     void apply_SC_EVAL_MODE(bool Nchan) {
@@ -783,12 +824,13 @@ public slots:
     }
 
     void applySettingsPM(TypePM *pm) {
-        addTransaction(write, pm->baseAddress + TypePM::Settings::block0addr, pm->set.registers0, TypePM::Settings::block0size);
-        addTransaction(write, pm->baseAddress + TypePM::Settings::block1addr, pm->set.registers1, TypePM::Settings::block1size);
-        addWordToWrite(pm->baseAddress + PMparameters["CH_MASK_DATA"].address, pm->set.CH_MASK_DATA);
-        addTransaction(write, pm->baseAddress + TypePM::Settings::block2addr, pm->set.registers2, TypePM::Settings::block2size);
-        addTransaction(write, pm->baseAddress + GBTunit::controlAddress, pm->set.GBT.registers, GBTunit::controlSize);
-        transceive();
+      IPBusPacket p;
+      p.addTransaction(this, write, pm->baseAddress + TypePM::Settings::block0addr, pm->set.registers0, TypePM::Settings::block0size);
+      p.addTransaction(this, write, pm->baseAddress + TypePM::Settings::block1addr, pm->set.registers1, TypePM::Settings::block1size);
+      p.addWordToWrite(this, pm->baseAddress + PMparameters["CH_MASK_DATA"].address, pm->set.CH_MASK_DATA);
+      p.addTransaction(this, write, pm->baseAddress + TypePM::Settings::block2addr, pm->set.registers2, TypePM::Settings::block2size);
+      p.addTransaction(this, write, pm->baseAddress + GBTunit::controlAddress, pm->set.GBT.registers, GBTunit::controlSize);
+      transceive(p);
     }
 
     void copyActualToSettingsTCM() {
@@ -802,15 +844,16 @@ public slots:
     }
 
     void applySettingsTCM() {
-        addTransaction(write, TypeTCM::Settings::block0addr, TCM.set.registers0, TypeTCM::Settings::block0size);
-        addTransaction(write, TypeTCM::Settings::block1addr, TCM.set.registers1, TypeTCM::Settings::block1size);
-        addTransaction(write, TypeTCM::Settings::block2addr, TCM.set.registers2, TypeTCM::Settings::block2size - 2); //0x1E should be skipped
-        addTransaction(write, TypeTCM::Settings::block2addr + TypeTCM::Settings::block2size - 1, TCM.set.registers2 + TypeTCM::Settings::block2size - 1, 1);
-        addWordToWrite(TCMparameters["CH_MASK_C"].address, TCM.set.CH_MASK_C);
-        addTransaction(write, TypeTCM::Settings::block3addr, TCM.set.registers3, TypeTCM::Settings::block3size);
-        addTransaction(write, GBTunit::controlAddress, TCM.set.GBT.registers, GBTunit::controlSize);
-
-        apply_COUNTERS_UPD_RATE(TCM.set.COUNTERS_UPD_RATE);
+      IPusPacket p;
+      p.addTransaction(this, write, TypeTCM::Settings::block0addr, TCM.set.registers0, TypeTCM::Settings::block0size);
+      p.addTransaction(this, write, TypeTCM::Settings::block1addr, TCM.set.registers1, TypeTCM::Settings::block1size);
+      p.addTransaction(this, write, TypeTCM::Settings::block2addr, TCM.set.registers2, TypeTCM::Settings::block2size - 2); //0x1E should be skipped
+      p.addTransaction(this, write, TypeTCM::Settings::block2addr + TypeTCM::Settings::block2size - 1, TCM.set.registers2 + TypeTCM::Settings::block2size - 1, 1);
+      p.addWordToWrite(this, TCMparameters["CH_MASK_C"].address, TCM.set.CH_MASK_C);
+      p.addTransaction(this, write, TypeTCM::Settings::block3addr, TCM.set.registers3, TypeTCM::Settings::block3size);
+      p.addTransaction(this, write, GBTunit::controlAddress, TCM.set.GBT.registers, GBTunit::controlSize);
+      transceive(p);
+      apply_COUNTERS_UPD_RATE(TCM.set.COUNTERS_UPD_RATE);
     }
 
     void copyActualToSettingsAll() {
@@ -824,8 +867,9 @@ public slots:
     }
 
     void apply_ORBIT_FILL_MASK() {
-        addTransaction(write, 0x2A00, TCM.ORBIT_FILL_MASK, 223);
-        transceive();
+      IPBusPacket p;
+      p.addTransaction(this, write, 0x2A00, TCM.ORBIT_FILL_MASK, 223);
+      transceive(p);
     }
 };
 
