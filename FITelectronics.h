@@ -71,8 +71,9 @@ public:
         TCM.set.T5_SIGN = FIT[sd].triggers[4].signature;
         countersTimer->setTimerType(Qt::PreciseTimer);
         connect(countersTimer, &QTimer::timeout, this, [=](){
-            addTransaction(read, 0x0F, &TCM.act.registers0[0x0F]); //status register
-            if (!transceive()) return;
+            IPBusPacket p;
+            p.addTransaction(this, read, 0x0F, &TCM.act.registers0[0x0F]); //status register
+            if (!transceive(p)) return;
             if (TCM.act.resetSystem) {
                 PMsReady = false;
                 PM.clear();
@@ -309,17 +310,17 @@ public slots:
       while (load) {
         IPBusPacket p;
         p.addTransaction(this, nonIncrementingRead, TypeTCM::Counters::addressFIFO, nullptr, load > 255 ? 255 : load);
-        addTransaction(this, read, TypeTCM::Counters::addressFIFOload, &load);
+        p.addTransaction(this, read, TypeTCM::Counters::addressFIFOload, &load);
         transceive(p);
       }
       foreach (TypePM *pm, PM) {
         load = readRegister(pm->baseAddress + TypePM::Counters::addressFIFOload);
         if (load == 0xFFFFFFFF) continue;
         while (load) {
-          IPBusPacket p;
-          p.addTransaction(this, nonIncrementingRead, pm->baseAddress + TypePM::Counters::addressFIFO, nullptr, load > 255 ? 255 : load);
-          p.addTransaction(this, read, pm->baseAddress + TypePM::Counters::addressFIFOload, &load);
-          transceive(p);
+          IPBusPacket pp;
+          pp.addTransaction(this, nonIncrementingRead, pm->baseAddress + TypePM::Counters::addressFIFO, nullptr, load > 255 ? 255 : load);
+          pp.addTransaction(this, read, pm->baseAddress + TypePM::Counters::addressFIFOload, &load);
+          transceive(pp);
         }
       }
     }
@@ -383,10 +384,10 @@ public slots:
                 else       TCM.set.CH_MASK_A |= 1 << i;
             }
         }
-        IPBusPacket p;
-        p.addWordToWrite(this, TCMparameters["CH_MASK_A"].address, TCM.set.CH_MASK_A);
-        p.addWordToWrite(this, TCMparameters["CH_MASK_C"].address, TCM.set.CH_MASK_C);
-        if (transceive(p)) emit linksStatusReady();
+        IPBusPacket pp;
+        pp.addWordToWrite(this, TCMparameters["CH_MASK_A"].address, TCM.set.CH_MASK_A);
+        pp.addWordToWrite(this, TCMparameters["CH_MASK_C"].address, TCM.set.CH_MASK_C);
+        if (transceive(pp)) emit linksStatusReady();
     }
 
     void writeParameter(QString name, quint64 val, quint16 FEEid, quint8 iCh = 0) {
@@ -418,8 +419,8 @@ public slots:
           p.addTransaction(this, read, pm->baseAddress + TypePM::Counters::addressFIFOload, &pm->counters.FIFOload);
         }
         if (!transceive(p)) return;
+        p.resetTransactions();
 
-        p = IPBusPacket(); // clear
         if (TCM.counters.FIFOload) {
           p.addTransaction(this, nonIncrementingRead, TypeTCM::Counters::addressFIFO, TCM.counters.New, TypeTCM::Counters::number);
         }
@@ -427,7 +428,7 @@ public slots:
           if (pm->counters.FIFOload) {
             if (maxPacket - p.responseSize() <= TypePM::Counters::number) {
               transceive(p);
-              p = IPBusPacket(); // clear
+              p.resetTransactions();
             }
             p.addTransaction(this, nonIncrementingRead, pm->baseAddress + TypePM::Counters::addressFIFO, pm->counters.New, TypePM::Counters::number);
           }
@@ -588,10 +589,11 @@ public slots:
 
     void reset(quint16 FEEid, quint8 RB_position, bool syncOnSuccess = true) {
         quint32 address = (FEEid == TCMid ? 0x0 : PM[FEEid]->baseAddress) + GBTunit::controlAddress;
-        addTransaction(RMWbits, address, masks(0xFFFF00FF, 0x00000000)); //clear all reset bits
-        addTransaction(RMWbits, address, masks(0xFFFFFFFF, 1 << RB_position)); //set specific bit, e.g. 0x00000800 for RS_GBTerrors
-        addTransaction(RMWbits, address, masks(0xFFFF00FF, 0x00000000)); //clear all reset bits
-        if (transceive() && syncOnSuccess) sync();
+        IPBusPacket p;
+        p.addTransaction(this, RMWbits, address, masks(0xFFFF00FF, 0x00000000)); //clear all reset bits
+        p.addTransaction(this, RMWbits, address, masks(0xFFFFFFFF, 1 << RB_position)); //set specific bit, e.g. 0x00000800 for RS_GBTerrors
+        p.addTransaction(this, RMWbits, address, masks(0xFFFF00FF, 0x00000000)); //clear all reset bits
+        if (transceive(p) && syncOnSuccess) sync();
     }
 
     void apply_RESET_ORBIT_SYNC           (quint16 FEEid, bool syncOnSuccess = true) { reset(FEEid, GBTunit::RB_orbitSync            , syncOnSuccess); }
@@ -725,8 +727,9 @@ public slots:
     void apply_LASER_DIVIDER() { writeParameter("LASER_DIVIDER", TCM.set.LASER_DIVIDER, TCMid); }
     void apply_LASER_SOURCE(bool on) { TCM.set.LASER_SOURCE = on; writeParameter("LASER_SOURCE", on, TCMid); }
     void apply_LASER_PATTERN() {
-        addTransaction(write, TCMparameters["LASER_PATTERN"].address, &TCM.set.laserPatternMSB, 2);
-        if (transceive()) sync();
+        IPBusPacket p;
+        p.addTransaction(this, write, TCMparameters["LASER_PATTERN"].address, &TCM.set.laserPatternMSB, 2);
+        if (transceive(p)) sync();
     }
 	void apply_SwLaserPatternBit(quint8 bit, bool on) {
 		quint32 address = TCMparameters["LASER_PATTERN"].address + (bit < 32 ? 1 : 0);
@@ -844,7 +847,7 @@ public slots:
     }
 
     void applySettingsTCM() {
-      IPusPacket p;
+      IPBusPacket p;
       p.addTransaction(this, write, TypeTCM::Settings::block0addr, TCM.set.registers0, TypeTCM::Settings::block0size);
       p.addTransaction(this, write, TypeTCM::Settings::block1addr, TCM.set.registers1, TypeTCM::Settings::block1size);
       p.addTransaction(this, write, TypeTCM::Settings::block2addr, TCM.set.registers2, TypeTCM::Settings::block2size - 2); //0x1E should be skipped

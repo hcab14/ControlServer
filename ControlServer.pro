@@ -31,6 +31,7 @@ SOURCES += \
 HEADERS += \
         FITboardsCommon.h \
         FITelectronics.h \
+        IPBusPacket.h \
         IPbusHeaders.h \
         IPbusInterface.h \
         PM.h \

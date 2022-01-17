@@ -22,7 +22,6 @@ public:
 
     IPbusTarget(quint16 lport = 0) : localport(lport) {
         qRegisterMetaType<errorType>("errorType");
-        request[0] = PacketHeader(control, 0);
         updateTimer->setTimerType(Qt::PreciseTimer);
         connect(updateTimer, &QTimer::timeout, this, [=]() { if (isOnline) sync(); else checkStatus(); });
         connect(this, &IPbusTarget::error, this, [=]() {
@@ -74,13 +73,13 @@ protected:
       return false;
     }
     n = qsocket->readDatagram((char *)p.response(), qsocket->pendingDatagramSize());
-    if (n == 64 && response[0] == p.statusRequest().header) {
+    if (n == 64 && p.response()[0] == p.statusRequest().header) {
       if (!qsocket->hasPendingDatagrams() && !qsocket->waitForReadyRead(100) && !qsocket->hasPendingDatagrams()) {
         isOnline = false;
         emit noResponse();
         return false;
       }
-      n = qsocket->readDatagram((char *)response, qsocket->pendingDatagramSize());
+      n = qsocket->readDatagram((char *)p.response(), qsocket->pendingDatagramSize());
     }
     if (n == 0) {
       emit error("empty response, no IPbus on " + IPaddress, networkError);
@@ -114,7 +113,7 @@ public slots:
 
     void checkStatus() {
       IPBusPacket p;
-      qsocket->write((char *)&p.statusRequest(), sizeof(statusRequest));
+      qsocket->write((char *)&p.statusRequest(), sizeof(p.statusRequest()));
       if (!qsocket->waitForReadyRead(100) && !qsocket->hasPendingDatagrams()) {
         isOnline = false;
         emit noResponse();
@@ -143,7 +142,7 @@ public slots:
 
   void setBit(quint8 n, quint32 address, bool syncOnSuccess = true) {
     IPBusPacket p;
-    addTransaction(this, RMWbits, address, masks(0xFFFFFFFF, 1 << n));
+    p.addTransaction(this, RMWbits, address, masks(0xFFFFFFFF, 1 << n));
     if (transceive(p) && syncOnSuccess) sync();
   }
 

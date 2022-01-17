@@ -3,7 +3,7 @@
 #ifndef IPBUSPACKET_H
 #define IPBUSPACKET_H
 
-#include <QObject.h>
+#include <QObject>
 #include "IPbusHeaders.h"
 // needs more include files
 
@@ -15,21 +15,25 @@ class IPBusPacket : public QObject {
   Q_OBJECT
 
 public:
-  IPBusPacket() {}
+  IPBusPacket() {
+      _request[0] = PacketHeader(control, 0);
+  }
   ~IPBusPacket() {}
 
   quint16 requestSize() const {return _requestSize; }
   quint16 responseSize() const {return _responseSize; }
   quint16& responseSize() {return _responseSize; }
-  quint32* request() const { return _request; }
-  quint32* response() const { return _response; }
+  quint32* request() { return _request; }
+  quint32* response() { return _response; }
   const StatusPacket& statusRequest() const {return  _statusRequest; }
+  const StatusPacket& statusResponse() const { return _statusResponse; }
   QList<Transaction>& transactionsList() { return _transactionsList; }
 
-  void addTransaction(QObject *q, TransactionType type, quint32 address, quint32 *data, quint8 nWords = 1) {
+  template<class Q>
+  void addTransaction(Q *q, TransactionType type, quint32 address, quint32 *data, quint8 nWords = 1) {
     Transaction currentTransaction;
     _request[_requestSize] = TransactionHeader(type, nWords, _transactionsList.size());
-    currentTransaction._requestHeader = (TransactionHeader *)(_request + _requestSize++);
+    currentTransaction.requestHeader = (TransactionHeader *)(_request + _requestSize++);
     _request[_requestSize] = address;
     currentTransaction.address = _request + _requestSize++;
     currentTransaction.responseHeader = (TransactionHeader *)(_response + _responseSize++);
@@ -63,17 +67,16 @@ public:
       return;
     } else _transactionsList.append(currentTransaction);
   }
-
-  Packet& addWordToWrite(QObject *q, quint32 address, quint32 value) {
+  template<class Q>
+  void addWordToWrite(Q *q, quint32 address, quint32 value) {
     addTransaction(q, write, address, &value, 1);
-    return p;
   }
-
-  bool processResponse(QObject *q) { //check transactions successfulness and copy read data to destination
+  template<class Q>
+  bool processResponse(Q *q) { //check transactions successfulness and copy read data to destination
     for (quint16 i=0; i<_transactionsList.size(); ++i) {
       TransactionHeader *th = _transactionsList.at(i).responseHeader;
-      if (th->ProtocolVersion != 2 || th->TransactionID != i || th->TypeID != _transactionsList.at(i)._requestHeader->TypeID) {
-        emit error(QString::asprintf("unexpected transaction header: %08X, expected: %08X", *th, *_transactionsList.at(i)._requestHeader & 0xFFFFFFF0), IPbusError);
+      if (th->ProtocolVersion != 2 || th->TransactionID != i || th->TypeID != _transactionsList.at(i).requestHeader->TypeID) {
+        emit q->error(QString::asprintf("unexpected transaction header: %08X, expected: %08X", *th, *_transactionsList.at(i).requestHeader & 0xFFFFFFF0), IPbusError);
         return false;
       }
       if (th->Words > 0) switch (th->TypeID) {
@@ -127,7 +130,11 @@ public:
       qDebug("        %08X", _response[i]);
     }
   }
-
+  void resetTransactions() { //return to initial (default) state
+    _requestSize = 1;
+    _responseSize = 1;
+    _transactionsList.clear();
+  }
 protected:
 private:
   const StatusPacket _statusRequest;
