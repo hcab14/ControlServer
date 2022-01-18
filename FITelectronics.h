@@ -2,6 +2,9 @@
 #define FITELECTRONICS_H
 
 #include <QSignalSpy>
+#include <QMutex>
+#include <QMutexLocker>
+#include <QTest>
 #include "IPbusInterface.h"
 #include "TCM.h"
 #include "PM.h"
@@ -58,6 +61,7 @@ public:
     quint16 thHi[12], thLo[12] = {0};
     double targetRate_Hz = 15.;
     TypePM *targetPM;
+    QMutex _mutexDIM;
 //*/
     FITelectronics(TypeFITsubdetector sd): IPbusTarget(50006), subdetector(sd), TCMid(FIT[sd].TCMid) {
 
@@ -299,12 +303,13 @@ public:
     }
 
     void commandHandler() {
+        QMutexLocker lock(&_mutexDIM); // protect this method so that there are no overlaps
         DimCommand *cmd = getCommand();
-        emit dimCommandReceived(cmd);
+        emit dimCommandReceived(cmd); // use this signal to transfer to the IPBusTarget thread
         QSignalSpy spy(this, SIGNAL(dimCommandFinished()));
-        QVERIFY(spy.wait(1000));
+        QVERIFY(spy.wait(1000)); // wait until the socket commmunication has finishedb
     }
-     void dimCommandHandler(DimCommand *cmd) {
+     void dimCommandHandler(DimCommand *cmd) { // here we are in the same thread as the socket is in
         allCommands[cmd](cmd);
         emit dimCommandFinished();
     }
@@ -319,7 +324,6 @@ signals:
 
 public slots:
 
-  void handleCommands(
     void clearFIFOs() {
 		quint32 load = readRegister(TypeTCM::Counters::addressFIFOload);
         if (load == 0xFFFFFFFF) return;
