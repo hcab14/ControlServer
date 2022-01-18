@@ -1,6 +1,7 @@
 #ifndef FITELECTRONICS_H
 #define FITELECTRONICS_H
 
+#include <QSignalSpy>
 #include "IPbusInterface.h"
 #include "TCM.h"
 #include "PM.h"
@@ -59,6 +60,9 @@ public:
     TypePM *targetPM;
 //*/
     FITelectronics(TypeFITsubdetector sd): IPbusTarget(50006), subdetector(sd), TCMid(FIT[sd].TCMid) {
+
+        connect(this, &FITelectronics::dimCommandReceived, this, &FITelectronics::dimCommandHandler);
+
         logFile.setFileName(QCoreApplication::applicationName() + ".log");
         logFile.open(QFile::WriteOnly | QIODevice::Append | QFile::Text);
         logStream.setDevice(&logFile);
@@ -296,7 +300,13 @@ public:
 
     void commandHandler() {
         DimCommand *cmd = getCommand();
+        emit dimCommandReceived(cmd);
+        QSignalSpy spy(this, SIGNAL(dimCommandFinished()));
+        QVERIFY(spy.wait(1000));
+    }
+     void dimCommandHandler(DimCommand *cmd) {
         allCommands[cmd](cmd);
+        emit dimCommandFinished();
     }
 
 signals:
@@ -304,9 +314,12 @@ signals:
     void valuesReady();
     void countersReady(quint16 FEEid);
     void resetFinished();
+    void dimCommandReceived(DimCommand *cmd);
+    void dimCommandFinished();
 
 public slots:
 
+  void handleCommands(
     void clearFIFOs() {
 		quint32 load = readRegister(TypeTCM::Counters::addressFIFOload);
         if (load == 0xFFFFFFFF) return;
